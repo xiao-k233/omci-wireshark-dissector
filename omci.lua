@@ -38,14 +38,31 @@
 
 --]]
 
+-- 定义位操作的局部变量，提高性能
+local band = bit.band
+local bor = bit.bor
+local rshift = bit.rshift
+local lshift = bit.lshift
+
+-- 优化的二进制转换函数
 function toBinStr(hexStr)
-	local num = tonumber(hexStr, 16)
-	local binaryStr = ""
-	repeat
-		binaryStr = tostring(num % 2) .. binaryStr
-		num = math.floor(num / 2)
-	until num == 0
-	return binaryStr
+    local num = tonumber(hexStr, 16)
+    if not num then return "" end
+    
+    local binaryStr = ""
+    local lookup = {[0]="0", [1]="1"}
+    
+    repeat
+        binaryStr = lookup[num % 2] .. binaryStr
+        num = math.floor(num / 2)
+    until num == 0
+    
+    -- 确保至少8位
+    while #binaryStr < 8 do
+        binaryStr = "0" .. binaryStr
+    end
+    
+    return binaryStr
 end
 
 -- Create a new dissector
@@ -162,7 +179,7 @@ local omci_def = {
 [6] = { me_class_name = "Circuit Pack",
 	{ attname="Type",                           length=1,  setbycreate=true  },
 	{ attname="Number of ports",                length=1,  setbycreate=false },
-	{ attname="Serial Number",                  length=8,  setbycreate=false },
+	{ attname="Serial Nr",                  length=8,  setbycreate=false },
 	{ attname="Version",                        length=14, setbycreate=false },
 	{ attname="Vendor Id",                      length=4,  setbycreate=false },
 	{ attname="Administrative State",           length=1,  setbycreate=true  },
@@ -394,8 +411,8 @@ local omci_def = {
 	  { attname="TP Type",                                   length=1,  setbycreate=true  }},
 
 [131] = { me_class_name = "OLT-G",
-	  { attname="OLT vendor ID",           length=4,  setbycreate=false },
-	  { attname="Equipment ID",            length=20, setbycreate=false },
+	  { attname="OLT vendor Id",           length=4,  setbycreate=false },
+	  { attname="Equipment Id",            length=20, setbycreate=false },
 	  { attname="Version",                 length=14, setbycreate=false },
 	  { attname="Time of day information", length=14, setbycreate=false }},
 
@@ -502,8 +519,8 @@ local omci_def = {
 	  { attname="Operational State",                      length=1,  setbycreate=false }},
 
 [257] = { me_class_name = "ONT2-G",
-	  { attname="Equipment id",                   length=20, setbycreate=false },
-	  { attname="OMCC version",                   length=1,  setbycreate=false },
+	  { attname="Equipment Id",                   length=20, setbycreate=false },
+	  { attname="OMCC Version",                   length=1,  setbycreate=false },
 	  { attname="Vendor product code",            length=2,  setbycreate=false },
 	  { attname="Security capability",            length=1,  setbycreate=false },
 	  { attname="Security mode",                  length=1,  setbycreate=false },
@@ -704,7 +721,7 @@ local omci_def = {
 	  { attname="Port list 8", length=16, setbycreate=false }},
 
 [309] = { me_class_name = "Multicast operations profile",
-	  { attname="IGMP version",                      length=1,  setbycreate=true  },
+	  { attname="IGMP Version",                      length=1,  setbycreate=true  },
 	  { attname="IGMP function",                     length=1,  setbycreate=true  },
 	  { attname="Immediate leave",                   length=1,  setbycreate=true  },
 	  { attname="Upstream IGMP TCI",                 length=2,  setbycreate=true  },
@@ -863,7 +880,11 @@ local omci_def = {
 	  { attname="Interdomain name",     length=4, setbycreate=false },
 	  { attname="TCP UDP pointer",      length=2, setbycreate=false },
 	  { attname="IANA assigned Port",   length=2, setbycreate=false }},
-
+[65530] = {me_class_name = "LOID",
+	  { attname="Operator Id", length=4, setbycreate=false },
+	  { attname="Logical ONU Id", length=24, setbycreate=false },
+	  { attname="Logical password", length=12, setbycreate=false },
+	  { attname="Credentials status", length=1, setbycreate=false }}
 }
 
 setmetatable(omci_def, mt2)
@@ -886,6 +907,19 @@ f.trailer        = ProtoField.bytes(  "omciproto.trailer",         "Trailer")
 f.cpcsuu_cpi     = ProtoField.uint16( "omciproto.cpcsuu_cpi",      "CPCS-UU and CPI",         base.HEX)
 f.cpcssdu_length = ProtoField.uint16( "omciproto.cpcssdu_length",  "CPCS-SDU Length",         base.HEX)
 f.crc32          = ProtoField.uint32( "omciproto.crc32",           "CRC32",                   base.HEX)
+
+-- Function to add attribute to the dissection tree
+local function add_attribute_to_tree(content_subtree, attr, attr_bytes, i)
+    -- Check if attribute is likely ASCII text based on name
+    if (attr.attname:match("list") or attr.attname:match("table") or attr.attname:match("mapping")) then
+        content_subtree:add(attr_bytes, string.format("%2.2d", i) .. ": " .. attr.attname .. " (" .. attr_bytes .. ")")
+    elseif (attr.attname:match("time") or attr.attname:match("Version") or attr.attname:match("Number") or attr.attname:match("Id$") or attr.attname:match("password")) and attr.length <= 32 then
+        local attr_str = attr_bytes:raw():gsub("\0", "")
+        content_subtree:add(attr_bytes, string.format("%2.2d", i) .. ": " .. attr.attname .. " (" .. attr_str .. ")")
+    else
+        content_subtree:add(attr_bytes, string.format("%2.2d", i) .. ": " .. attr.attname .. " (" .. attr_bytes .. ")")
+    end
+end
 
 -- The dissector function
 function omciproto.dissector (buffer, pinfo, tree)
@@ -961,7 +995,7 @@ function omciproto.dissector (buffer, pinfo, tree)
 			local attr = attributes[i]
 			if attribute_mask:bitfield(i-1,1) == 1 then
 				local attr_bytes = content(attribute_offset, attr.length)
-				content_subtree:add(attr_bytes, string.format("%2.2d", i) .. ": " .. attr.attname .. " (" .. attr_bytes .. ")")
+				add_attribute_to_tree(content_subtree, attr, attr_bytes, i)
 				attribute_offset = attribute_offset + attr.length
 			end
 		end
@@ -980,7 +1014,8 @@ function omciproto.dissector (buffer, pinfo, tree)
 			local attr = attributes[i]
 			if attribute_mask:bitfield(i-1,1) == 1 then
 				local attr_bytes = content(attribute_offset, attr.length)
-				content_subtree:add(attr_bytes, string.format("%2.2d", i) .. ": " .. attr.attname .. " (" .. attr_bytes .. ")")
+				-- Check if attribute is likely ASCII text based on name
+				add_attribute_to_tree(content_subtree, attr, attr_bytes, i)
 				attribute_offset = attribute_offset + attr.length
 			end
 		end
@@ -1034,7 +1069,7 @@ function omciproto.dissector (buffer, pinfo, tree)
 			local attr = attributes[i]
 			if attribute_mask:bitfield(i-1,1) == 1 then
 				local attr_bytes = content(attribute_offset, attr.length)
-				content_subtree:add(attr_bytes, string.format("%2.2d", i) .. ": " .. attr.attname .. " (" .. attr_bytes .. ")")
+				add_attribute_to_tree(content_subtree, attr, attr_bytes, i)
 				attribute_offset = attribute_offset + attr.length
 			end
 		end
